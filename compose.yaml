@@ -1,0 +1,50 @@
+networks:
+  vpndogs: { name: vpndogs }
+
+services:
+  ipsec:
+    build: { context: ., network: host }
+    image: strongswan-server:latest
+    container_name: strongswan-server
+    networks: [vpndogs]
+    ports:
+      # 500/4500 are what native IKEv2 clients and legacy IKEv1 routers can
+      # reach; 1061 is the extra port strongSwan-based clients can target
+      # (it lands on charon's stock NAT-T socket).
+      - "500:500/udp"
+      - "4500:4500/udp"
+      - "1061:4500/udp"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun
+    sysctls:
+      # forwarding is required: XFRM decapsulates into the container netns and
+      # the policy route hands the packet to tun0
+      net.ipv4.ip_forward: "1"
+      # rp_filter drops XFRM-decapped packets: their source (the VPN pool) has
+      # no reverse path in the main table
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    environment:
+      IPSEC_USERS: ${IPSEC_USERS:-}
+      IPSEC_PSK: ${IPSEC_PSK:-}
+      VPN_SERVER_ADDR: ${VPN_SERVER_ADDR:-}
+      VPN_POOL: ${VPN_POOL:-10.10.10.0/24}
+      CLIENT_DNS: ${CLIENT_DNS:-1.1.1.1}
+      CHAIN_SOCKS_HOST: ${CHAIN_SOCKS_HOST:-vpndogs-router}
+      CHAIN_SOCKS_PORT: ${CHAIN_SOCKS_PORT:-1070}
+      LOG_LEVEL: ${LOG_LEVEL:-1}
+    volumes:
+      - ipsec-certs:/etc/swanctl
+    healthcheck:
+      test: ["CMD", "swanctl", "--stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  ipsec-certs: {}
