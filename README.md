@@ -14,7 +14,7 @@ It is an optional inbound node for the vpndogs stack — enable it with
 |---|---|---|
 | Native IKEv2 (Windows / iOS / macOS / Android) | 500, 4500 | `VPN_SERVER_ADDR` as server, EAP username/password from `IPSEC_USERS`, import the CA first |
 | strongSwan-based clients | 1061 (→ 4500) | same EAP credentials, server on `host:1061` |
-| Legacy IKEv1 routers | 500 | shared secret = `IPSEC_PSK`, main mode |
+| Legacy IKEv1 routers | 500 | shared secret = `IPSEC_PSK`, main mode — see [docs/router-site-to-site.md](docs/router-site-to-site.md) |
 
 IKEv1 is main mode only — aggressive mode is deliberately not offered (it is a
 known offline PSK-cracking surface).
