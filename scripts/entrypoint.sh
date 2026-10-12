@@ -242,9 +242,12 @@ wait_for() { # wait_for <seconds> <cmd...>
 
 # Decrypted client packets arrive on eth0 with a pool source address that has no
 # reverse path in the main table, so strict reverse-path filtering would drop
-# them. netns-local, unlike ip_forward which compose sets.
+# them. Docker mounts /proc/sys read-only inside containers, so compose's
+# sysctls are what actually set this; the attempt below only covers a manual
+# `docker run` without them.
 relax_rp_filter() {
-    sysctl -q -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
+    sysctl -q -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 2>/dev/null \
+        || log "note: cannot write /proc/sys here — set rp_filter=0 via compose sysctls"
 }
 
 # A pool inside the container's own subnet would make decrypted traffic route

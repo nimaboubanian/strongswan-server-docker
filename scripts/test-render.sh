@@ -113,7 +113,8 @@ exit_is() { # name want cmd...  (stdout+stderr in $LAST_OUT)
 }
 
 matches() { # name regex got — a value that must be a real thing, not an empty string
-    if [[ "$3" =~ $2 ]]; then
+    local name="$1" regex="$2" got="$3"
+    if [[ "$got" =~ $regex ]]; then
         echo "$name: PASS"
     else
         echo "$name: FAIL"
@@ -228,6 +229,8 @@ exit_is "case7 disjoint allowed" 1 subcmd selftest-cidr 10.10.10.0/24 192.168.1.
 # ---------------------------------------------------------------------------
 if [ "$MODE" = docker ]; then
     vol="ipsec-certs-test-$$"
+    # never leak a volume when a case aborts the run
+    trap 'docker volume rm -f "$vol" >/dev/null 2>&1 || true' EXIT
     docker volume rm -f "$vol" >/dev/null 2>&1 || true
 
     # Case 8: first boot generates CA + server cert into the mounted volume
