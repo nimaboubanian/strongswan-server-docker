@@ -267,10 +267,13 @@ x509ca/ca-cert.pem" \
     # Native Windows/iOS/macOS IKEv2 clients accept only RSA or ECDSA P-256/P-384
     # certificates — an Ed25519 server cert passes every other check here and is
     # still rejected by the first real client.
-    has "case8 CA key is RSA" "rsaEncryption" \
+    # matched case-insensitively: pki --print words the algorithm differently
+    # across versions ("rsaEncryption", "RSA", "sha256WithRSAEncryption"), but an
+    # Ed25519 certificate never says "rsa" anywhere
+    matches "case8 CA key is RSA" '(?i)rsa' \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'pki --print --in /etc/swanctl/x509ca/ca-cert.pem' 2>&1)"
-    has "case8 server key is RSA" "rsaEncryption" \
+    matches "case8 server key is RSA" '(?i)rsa' \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'pki --print --in /etc/swanctl/x509/server-cert.pem' 2>&1)"
 
