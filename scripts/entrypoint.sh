@@ -224,6 +224,148 @@ cmd_render() {
     cert_params
 }
 
+# --- boot ------------------------------------------------------------------
+
+declare -A CHILD_PIDS=()
+
+child_dead() { ! kill -0 "${CHILD_PIDS[$1]}" 2>/dev/null; }
+
+wait_for() { # wait_for <seconds> <cmd...>
+    local deadline=$(( SECONDS + $1 ))
+    shift
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        "$@" && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Decrypted client packets arrive on eth0 with a pool source address that has no
+# reverse path in the main table, so strict reverse-path filtering would drop
+# them. netns-local, unlike ip_forward which compose sets.
+relax_rp_filter() {
+    sysctl -q -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
+}
+
+# A pool inside the container's own subnet would make decrypted traffic route
+# back into the same netns instead of the tun — a black hole, silently.
+guard_pool_subnet() {
+    local cidr
+    while read -r cidr; do
+        if cidr_overlap "$cidr" "$VPN_POOL"; then
+            fatal "VPN_POOL $VPN_POOL overlaps the container's own subnet $cidr" \
+                "— pick a pool outside it (container subnets: $(ip -4 -o addr show scope global | awk '{print $4}' | paste -sd, -))"
+        fi
+    done < <(ip -4 -o addr show scope global | awk '{print $4}')
+}
+
+generate_certs() {
+    local ca_cert="$SWANCTL_DIR/x509ca/ca-cert.pem" san dn pub
+    if [ -s "$ca_cert" ]; then
+        log "reusing existing CA at $ca_cert"
+        return
+    fi
+    mkdir -p "$SWANCTL_DIR"/x509ca "$SWANCTL_DIR"/certs "$SWANCTL_DIR"/private
+    san="${SERVER_SAN:-}"
+    dn="${SERVER_DN:-}"
+    [ -n "$san" ] || { mapfile -t cert_params_out < <(cert_params); san="${cert_params_out[0]#SERVER_SAN=}"; dn="${cert_params_out[1]#SERVER_DN=}"; }
+    pub="$(mktemp)"
+    pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
+    pki --self --ca --lifetime 3650 --in "$SWANCTL_DIR/private/ca-key.pem" \
+        --dn "C=CH, O=vpndogs, CN=vpndogs IPsec CA" --outform pem >"$ca_cert"
+    pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
+    pki --pub --in "$SWANCTL_DIR/private/server-key.pem" --outform pem >"$pub"
+    pki --issue --lifetime 1095 --cacert "$ca_cert" --cakey "$SWANCTL_DIR/private/ca-key.pem" \
+        --in "$pub" --dn "$dn" --san "$san" \
+        --flag serverAuth --flag iKEIntermediate --outform pem >"$SWANCTL_DIR/certs/server-cert.pem"
+    rm -f "$pub"
+    chmod 600 "$SWANCTL_DIR/private/ca-key.pem" "$SWANCTL_DIR/private/server-key.pem"
+    log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/certs/server-cert.pem (SAN $san)"
+}
+
+render_configs() {
+    mkdir -p "$STRONGSWAN_D" "$(dirname "$SINGBOX_CONF")"
+    render_strongswan_conf >"$STRONGSWAN_D/vpndogs.conf"
+    render_swanctl_conf >"$SWANCTL_DIR/swanctl.conf"
+    render_singbox_conf >"$SINGBOX_CONF"
+    sing-box check -c "$SINGBOX_CONF" && log "sing-box config ok"
+}
+
+start_singbox() {
+    sing-box run -c "$SINGBOX_CONF" &
+    CHILD_PIDS[sing-box]=$!
+    wait_for 15 ip link show "$TUN_IFACE" \
+        || { log "FATAL: $TUN_IFACE never came up — check /dev/net/tun in compose"; exit 1; }
+    log "sing-box up, $TUN_IFACE ready"
+}
+
+# Policy routing, not auto_route: only decrypted pool-source traffic enters the
+# tun. charon's own IKE and sing-box's SOCKS traffic keep the normal route.
+install_routes() {
+    ip rule add from "$VPN_POOL" lookup "$ROUTER_TABLE"
+    ip route add default dev "$TUN_IFACE" table "$ROUTER_TABLE"
+    log "ip rule from $VPN_POOL lookup $ROUTER_TABLE + default dev $TUN_IFACE installed"
+}
+
+start_charon() {
+    grep -q '^config setup' /etc/ipsec.conf 2>/dev/null \
+        || printf 'config setup\n\tcharon = ""\n' >/etc/ipsec.conf
+    ipsec start --nofork &
+    CHILD_PIDS[charon]=$!
+    wait_for 15 swanctl --stats >/dev/null \
+        || { log "FATAL: charon's vici socket never came up"; exit 1; }
+    swanctl --load-all || { log "FATAL: charon rejected the rendered configuration"; exit 1; }
+    log "charon up, rw-eap and rw-psk loaded"
+}
+
+restart_child() {
+    case "$1" in
+        sing-box) start_singbox ;;
+        charon) start_charon ;;
+    esac
+}
+
+supervise() {
+    local deaths=0 name other healthy
+    trap 'shutdown' TERM INT
+    while true; do
+        wait -n 2>/dev/null || true
+        for name in "${!CHILD_PIDS[@]}"; do
+            child_dead "$name" || continue
+            deaths=$((deaths + 1))
+            log "child '$name' died (consecutive deaths: $deaths) — restarting"
+            restart_child "$name" || exit 1
+            [ "$deaths" -ge 3 ] && { log "FATAL: $deaths consecutive child deaths — giving up"; exit 1; }
+            sleep 5
+            healthy=1
+            for other in "${!CHILD_PIDS[@]}"; do child_dead "$other" && healthy=0; done
+            [ "$healthy" = 1 ] && deaths=0
+        done
+    done
+}
+
+shutdown() {
+    log "shutting down"
+    [ -n "${CHILD_PIDS[sing-box]:-}" ] && kill "${CHILD_PIDS[sing-box]}" 2>/dev/null || true
+    [ -n "${CHILD_PIDS[charon]:-}" ] && kill "${CHILD_PIDS[charon]}" 2>/dev/null || true
+    exit 0
+}
+
+main() {
+    validate_env
+    guard_pool_subnet
+    relax_rp_filter
+    generate_certs
+    if [ "${BOOT_STAGE:-}" = certs-only ]; then exit 0; fi
+    render_configs
+    if [ "${BOOT_STAGE:-}" = configs-only ]; then exit 0; fi
+    start_singbox
+    install_routes
+    start_charon
+    if [ "${BOOT_STAGE:-}" = load-only ]; then exit 0; fi
+    supervise
+}
+
 case "${1:-}" in
     render)
         cmd_render
@@ -233,7 +375,6 @@ case "${1:-}" in
         cidr_overlap "$@"
         ;;
     *)
-        echo "boot not implemented yet (Task 3)" >&2
-        exit 1
+        main
         ;;
 esac

@@ -112,6 +112,16 @@ exit_is() { # name want cmd...  (stdout+stderr in $LAST_OUT)
     eq "$name" "$want" "$got"
 }
 
+matches() { # name regex got — a value that must be a real thing, not an empty string
+    if [[ "$3" =~ $2 ]]; then
+        echo "$name: PASS"
+    else
+        echo "$name: FAIL"
+        printf '  %q does not match %s\n' "$3" "$2" >&2
+        fail=1
+    fi
+}
+
 fatal_is() { # fatal_is name want_msg KEY=VAL... — render exits 2 and says why
     local name="$1" msg="$2" got=0 out
     shift 2
@@ -244,7 +254,7 @@ x509ca/ca-cert.pem" \
 
     # Case 10: live boot — charon accepts both connections (strongest check)
     exit_is "case10 live boot loads both conns" 0 \
-        docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
+        docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW --device /dev/net/tun \
             -v "$vol":/etc/swanctl -e BOOT_STAGE=load-only "${FIX_DE[@]}" "$IMG"
     has "case10 ikev2 conn loaded" "loaded connection 'rw-eap'" "$LAST_OUT"
     has "case10 ikev1 conn loaded" "loaded connection 'rw-psk'" "$LAST_OUT"
@@ -256,6 +266,7 @@ x509ca/ca-cert.pem" \
             -c 'sha256sum /etc/swanctl/x509ca/ca-cert.pem | cut -d" " -f1'
     }
     ca1="$(ca_fingerprint)"; ca2="$(ca_fingerprint)"
+    matches "case11 CA fingerprint is real" '^[0-9a-f]{64}$' "$ca1"
     eq "case11 CA reused across boots" "$ca1" "$ca2"
 
     # Case 12: a pool overlapping the container's own subnet is fatal (Review Focus 4)
