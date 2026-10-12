@@ -332,6 +332,7 @@ x509ca/ca-cert.pem" \
     # echo a second user's password (the first user is not enough of a guard).
     report_out="$(docker run --rm --entrypoint /bin/sh \
         -e IPSEC_USERS=alice:leaked1,bob:leaked2 -e IPSEC_PSK=leaked3 \
+        -e VPN_POOL=10.10.10.0/24 -e VPN_SERVER_ADDR=vpn.example.com \
         "$IMG" -c 'report.sh' 2>&1)"
     lacks "case14 report hides the first password" "leaked1" "$report_out"
     lacks "case14 report hides later passwords" "leaked2" "$report_out"

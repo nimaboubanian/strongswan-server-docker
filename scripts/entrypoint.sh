@@ -32,14 +32,33 @@ fatal() { echo "FATAL: $*" >&2; exit 2; }
 
 declare -a EAP_USERS=()
 
+# strongSwan's config grammar has no escaping: '#' truncates a value, a newline
+# ends it, a brace opens or closes a section, and a section name may not contain
+# whitespace or '.'. A value carrying one of those renders a config that loads
+# and then silently cannot authenticate — worse than refusing to start.
+assert_config_safe() { # assert_config_safe <what> <value>
+    local what="$1" value="$2" c
+    for c in '#' '{' '}' '"' "'" $'\n' $'\r' $'\t'; do
+        if [[ "$value" == *"$c"* ]]; then
+            fatal "unsupported character in $what: strongSwan config cannot carry # { } \" ' or a line break (offending value: '$value')"
+        fi
+    done
+}
+
 parse_users() {
     local entries=() entry user pass seen=" "
+    # `read` stops at a line break, so a multi-line value would silently drop
+    # everything after the last entry's password.
+    [[ "$IPSEC_USERS" != *$'\n'* ]] ||
+        fatal "unsupported character in IPSEC_USERS: a line break truncates the last entry (check for a multi-line value; the value is not echoed because it carries passwords)"
     IFS=',' read -r -a entries <<<"$IPSEC_USERS"
     for entry in "${entries[@]}"; do
         [[ "$entry" == *:* ]] || fatal "IPSEC_USERS entry without ':' — expected user:pass (got '$entry')"
         user="${entry%%:*}"
         pass="${entry#*:}"   # first colon only: passwords may contain colons
         [[ -n "$user" ]] || fatal "IPSEC_USERS entry with empty username (got '$entry')"
+        [[ "$user" =~ ^[A-Za-z0-9_@+-]+$ ]] || fatal "unsupported character in IPSEC_USERS entry '$entry': usernames may use letters, digits and _ @ + - only"
+        assert_config_safe "password for '$user'" "$pass"
         [[ "$seen" != *" $user "* ]] || fatal "duplicate IPSEC_USERS entry '$user'"
         seen="$seen$user "
         EAP_USERS+=("$user"$'\t'"$pass")
@@ -55,6 +74,7 @@ validate_env() {
     [[ "$CHAIN_SOCKS_PORT" =~ ^[0-9]+$ ]] || fatal "CHAIN_SOCKS_PORT must be a port number, got '$CHAIN_SOCKS_PORT'"
     is_ipv4_cidr "$VPN_POOL" || fatal "VPN_POOL is not a valid CIDR, got '$VPN_POOL'"
     is_ipv4_addr "$CLIENT_DNS" || fatal "CLIENT_DNS is not a valid IPv4 address, got '$CLIENT_DNS'"
+    assert_config_safe "IPSEC_PSK" "$IPSEC_PSK"
     parse_users
 }
 
@@ -204,11 +224,17 @@ render_singbox_conf() {
 }
 
 cert_params() {
-    local san_type=DNS
+    local san_type=DNS san
     if [[ "$VPN_SERVER_ADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        san_type=IP
+        # Windows/iOS/macOS only accept an address in a dNSName SAN (error 13801
+        # otherwise), while strongSwan clients dialing the address match on the
+        # iPAddress SAN — so an IP literal gets both.
+        san_type="dns"
+        echo "SERVER_SAN=${san_type}:${VPN_SERVER_ADDR}"
+        echo "SERVER_SAN_ALT=IP:${VPN_SERVER_ADDR}"
+    else
+        echo "SERVER_SAN=DNS:${VPN_SERVER_ADDR}"
     fi
-    echo "SERVER_SAN=${san_type}:${VPN_SERVER_ADDR}"
     echo "SERVER_DN=CN=${VPN_SERVER_ADDR}"
 }
 
@@ -264,25 +290,33 @@ guard_pool_subnet() {
 
 generate_certs() {
     local ca_cert="$SWANCTL_DIR/x509ca/ca-cert.pem" pub
-    local -a params=()
+    local -a params=() san_args=()
     if [ -s "$ca_cert" ]; then
         log "reusing existing CA at $ca_cert"
         return
     fi
     mkdir -p "$SWANCTL_DIR"/x509ca "$SWANCTL_DIR"/x509 "$SWANCTL_DIR"/private
     mapfile -t params < <(cert_params)
+    for p in "${params[@]}"; do
+        [[ "$p" == SERVER_SAN_ALT=* ]] && san_args+=(--san "${p#SERVER_SAN_ALT=}")
+    done
+    san_args=(--san "${params[0]#SERVER_SAN=}" "${san_args[@]}")
     pub="$(mktemp)"
-    pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
+    # RSA, not Ed25519: strongSwan's interop docs state that native Windows /
+    # iOS / macOS IKEv2 clients accept only RSA or ECDSA P-256/P-384
+    # certificates, so an Ed25519 server cert loads here and is rejected by the
+    # first real client.
+    pki --gen --type rsa --bits 3072 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
     pki --self --ca --lifetime 3650 --in "$SWANCTL_DIR/private/ca-key.pem" \
         --dn "C=CH, O=vpndogs, CN=vpndogs IPsec CA" --outform pem >"$ca_cert"
-    pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
+    pki --gen --type rsa --bits 3072 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
     pki --pub --in "$SWANCTL_DIR/private/server-key.pem" --outform pem >"$pub"
     # x509/, not certs/: that is where swanctl looks for end-entity certs.
     pki --issue --lifetime 1095 --cacert "$ca_cert" --cakey "$SWANCTL_DIR/private/ca-key.pem" \
-        --in "$pub" --dn "${params[1]#SERVER_DN=}" --san "${params[0]#SERVER_SAN=}" \
+        --in "$pub" --dn "${params[1]#SERVER_DN=}" "${san_args[@]}" \
         --flag serverAuth --flag iKEIntermediate --outform pem >"$SWANCTL_DIR/x509/server-cert.pem"
     rm -f "$pub"
-    chmod 600 "$SWANCTL_DIR/private/ca-key.pem" "$SWANCTL_DIR/private/server-key.pem"
+    chmod 600 "$SWANCTL_DIR/private/ca-key.pem" "$SWANCTL_DIR/private/server-key.pem" "$SWANCTL_DIR/swanctl.conf"
     log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/x509/server-cert.pem (${params[0]})"
 }
 
@@ -304,9 +338,12 @@ start_singbox() {
 
 # Policy routing, not auto_route: only decrypted pool-source traffic enters the
 # tun. charon's own IKE and sing-box's SOCKS traffic keep the normal route.
+# Idempotent: the tun device's death takes its route with it, so this runs again
+# after every sing-box restart.
 install_routes() {
+    ip rule del from "$VPN_POOL" lookup "$ROUTER_TABLE" 2>/dev/null || true
     ip rule add from "$VPN_POOL" lookup "$ROUTER_TABLE"
-    ip route add default dev "$TUN_IFACE" table "$ROUTER_TABLE"
+    ip route replace default dev "$TUN_IFACE" table "$ROUTER_TABLE"
     log "ip rule from $VPN_POOL lookup $ROUTER_TABLE + default dev $TUN_IFACE installed"
 }
 
@@ -323,26 +360,30 @@ start_charon() {
 
 restart_child() {
     case "$1" in
-        sing-box) start_singbox ;;
+        # a fresh tun needs its route back, or decrypted traffic is dropped
+        sing-box) start_singbox && install_routes ;;
         charon) start_charon ;;
     esac
 }
 
 supervise() {
-    local deaths=0 name other healthy
+    local deaths=0 name
     trap 'shutdown' TERM INT
     while true; do
         wait -n 2>/dev/null || true
         for name in "${!CHILD_PIDS[@]}"; do
             child_dead "$name" || continue
             deaths=$((deaths + 1))
-            log "child '$name' died (consecutive deaths: $deaths) — restarting"
+            log "child '$name' died (deaths since boot: $deaths) — restarting"
             restart_child "$name" || exit 1
-            [ "$deaths" -ge 3 ] && { log "FATAL: $deaths consecutive child deaths — giving up"; exit 1; }
-            sleep 5
-            healthy=1
-            for other in "${!CHILD_PIDS[@]}"; do child_dead "$other" && healthy=0; done
-            [ "$healthy" = 1 ] && deaths=0
+            # Counted per container lifetime, not per "both children looked
+            # healthy" check: a daemon that crashes, restarts, survives past the
+            # grace period and crashes again would reset that counter forever
+            # and flap while the healthcheck stayed green.
+            if [ "$deaths" -ge 3 ]; then
+                log "FATAL: $deaths child deaths since boot — giving up"
+                exit 1
+            fi
         done
     done
 }

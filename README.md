@@ -48,7 +48,11 @@ gated behind the `ipsec-inbound` profile and wired to the router's healthcheck.
 | `LOG_LEVEL` | charon log level, 0–4 | `1` |
 
 `IPSEC_USERS` entries split on the **first** colon, so passwords may contain
-colons. A duplicate username or an entry without a colon is fatal, not ignored.
+colons. A duplicate username, an entry without a colon, a username outside
+letters/digits/`_@+-`, or a value carrying `# { } " '` or a line break is fatal,
+not ignored — those characters silently truncate or break a strongSwan config
+file. Certificate keys are RSA-3072 because native Windows/iOS/macOS IKEv2
+clients reject Ed25519.
 
 `VPN_POOL` must not overlap the container's own subnet — the entrypoint refuses
 to boot if it does, because that would silently black-hole decrypted traffic.
@@ -80,6 +84,34 @@ Prints process state, interfaces and the policy route, loaded connections and
 SAs, XFRM state, certificate subjects/expiry, and the config with secrets
 redacted.
 
+## End-to-end checklist
+
+The automated suite stops at "charon accepted the config" — no SA is ever
+established by a test. After deploying, walk this once:
+
+```sh
+docker compose exec ipsec report.sh
+```
+
+1. **Both connections loaded** — `rw-eap` and `rw-psk` under *IKE connections*.
+2. **Processes up** — charon and sing-box both `UP`, and `ps -ef` shows charon
+   as a child of the starter (if the starter supervises a charon that is gone,
+   the process tree is not what the supervisor expects).
+3. **A client connects**, then:
+4. **SA present** — the client's address appears under *Established SAs*.
+5. **The outbound XFRM policy is narrowed to that address.** `ip xfrm policy`
+   inside the container must show the outbound policy narrowed to the assigned
+   virtual IP (`src 10.10.10.x dst 0.0.0.0/0`) — **not** `0.0.0.0/0`. If either
+   side negotiated a wildcard, charon also ESP-encrypts sing-box's own SOCKS
+   traffic to the router, and the policy route cannot prevent it (XFRM output
+   runs before the routing decision the rule governs): the tunnel goes nowhere
+   and the router connection dies with it.
+6. **Policy route present** — `ip route show table 200` shows
+   `default dev tun0`.
+7. **Egress goes through the chain** — from the client, the egress IP is the
+   sb-cluster's, and domestic/blackholed destinations behave as
+   `configs/check.sh` describes on the host side.
+
 ## Testing
 
 ```sh
@@ -98,6 +130,21 @@ its own IPsec/L2TP daemon, publishing fails or packets go to the wrong daemon.
 Stop the host's daemon, or publish different host ports — but then native IKEv2
 clients and legacy routers cannot reach you (they hardcode 500/4500); only
 strongSwan-based clients can use a custom port (1061).
+
+**Client connects but the SA passes no traffic, and the host is not at fault on
+ports.** Check the *host* kernel modules first — a container shares the host
+kernel, so these must be present there, not in the image:
+
+```sh
+lsmod | grep -E '^(ip_compat|af_alg|crypto_user|xfrm_user)'
+# if anything is missing:
+sudo modprobe ip_compat af_alg crypto_user xfrm_user
+```
+
+`ip_compat` is what ESP-in-UDP encapsulation rides on, and `af_alg` +
+`crypto_user` are what ChaCha20-Poly1305 / AES-GCM ESP use. Without them the SA
+negotiates and then carries nothing, and the symptom looks like a routing
+problem rather than a missing module.
 
 **Client connects but no traffic.** Check `report.sh`: the tun must exist and the
 policy route must be installed. Then check the router: if it is down, decrypted

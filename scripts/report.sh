@@ -12,7 +12,12 @@ echo
 echo "== Interfaces and routing =="
 ip -4 -o addr show 2>/dev/null | sed 's/^/  /'
 ip rule show 2>/dev/null | sed 's/^/  /'
-ip route show table 200 2>/dev/null | sed 's/^/  /' || echo "  (table 200 empty — policy route not installed)"
+# `cmd | sed || fallback` never runs the fallback: the pipeline's status is sed's.
+if ! ip route show table 200 2>/dev/null | grep -q .; then
+    echo "  (table 200 empty — policy route not installed)"
+else
+    ip route show table 200 2>/dev/null | sed 's/^/  /'
+fi
 
 echo
 echo "== IKE connections =="
@@ -29,11 +34,12 @@ ip xfrm policy 2>/dev/null | head -20 | sed 's/^/  /'
 
 echo
 echo "== Certificates =="
+# pki is the tool that ships in this image (the openssl CLI does not), and it
+# prints the same fields.
 for c in /etc/swanctl/x509/server-cert.pem /etc/swanctl/x509ca/ca-cert.pem; do
     if [ -f "$c" ]; then
         printf '  %s\n' "$c"
-        openssl x509 -in "$c" -noout -subject -enddate 2>/dev/null | sed 's/^/    /' \
-            || pki --print --in "$c" 2>/dev/null | grep -E 'subject|notAfter' | sed 's/^/    /'
+        pki --print --in "$c" 2>/dev/null | grep -E 'subject:|issuer:|notAfter' | sed 's/^/    /'
     else
         printf '  %s MISSING\n' "$c"
     fi
@@ -45,6 +51,8 @@ echo "  tun peer configured as socks ${CHAIN_SOCKS_HOST:-vpndogs-router}:${CHAIN
 
 echo
 echo "== Config (secrets redacted) =="
+# This output is what users paste into issue trackers: redact the whole value,
+# not just its first field — IPSEC_USERS is the one with N passwords in it.
 env | grep -E '^(VPN_|CHAIN_|LOG_LEVEL|IPSEC_)' | sed \
-    -e 's/^\(IPSEC_USERS=\)[^,]*\(,\)\?/\1<redacted>\2/' \
+    -e 's/^\(IPSEC_USERS=\).*/\1<redacted>/' \
     -e 's/^\(IPSEC_PSK=\).*/\1<redacted>/' | sort | sed 's/^/  /'
