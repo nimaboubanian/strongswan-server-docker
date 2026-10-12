@@ -245,15 +245,17 @@ x509ca/ca-cert.pem" \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'cd /etc/swanctl && ls private/ca-key.pem private/server-key.pem x509/server-cert.pem x509ca/ca-cert.pem 2>&1')"
 
-    # Case 9: rendered configs land at their real paths and sing-box accepts ours
+    # Case 9: configs render to their real paths and sing-box accepts ours.
+    # Listed inside the same container that renders them — only /etc/swanctl is
+    # a volume, so a second container would only ever see swanctl.conf.
     exit_is "case9 configs render" 0 \
-        image_run -v "$vol":/etc/swanctl -e BOOT_STAGE=configs-only "$IMG"
+        docker run --rm -v "$vol":/etc/swanctl -e BOOT_STAGE=configs-only "${FIX_DE[@]}" \
+            --entrypoint /bin/sh "$IMG" -c \
+            '/usr/local/bin/entrypoint.sh && ls /etc/swanctl/swanctl.conf /etc/strongswan.d/vpndogs.conf /etc/sing-box/config.json'
     has "case9 sing-box config valid" "sing-box config ok" "$LAST_OUT"
-    eq "case9 configs landed" "/etc/sing-box/config.json
-/etc/strongswan.d/vpndogs.conf
-/etc/swanctl/swanctl.conf" \
-        "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
-            -c 'ls /etc/swanctl/swanctl.conf /etc/strongswan.d/vpndogs.conf /etc/sing-box/config.json 2>&1')"
+    has "case9 swanctl.conf landed" "/etc/swanctl/swanctl.conf" "$LAST_OUT"
+    has "case9 strongswan drop-in landed" "/etc/strongswan.d/vpndogs.conf" "$LAST_OUT"
+    has "case9 sing-box config landed" "/etc/sing-box/config.json" "$LAST_OUT"
 
     # Case 10: live boot — charon accepts both connections (strongest check)
     exit_is "case10 live boot loads both conns" 0 \
