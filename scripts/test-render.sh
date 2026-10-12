@@ -186,13 +186,17 @@ assert "case2 sing-box shape" '
     and .route.final == "chain-out"
 ' "$sbx"
 
-# Case 3: SERVER_SAN type flips between IP literal and FQDN (Review Focus 3)
+# Case 3: SERVER_SAN type flips between IP literal and FQDN (Review Focus 3).
+# A bare IP must land in a dNSName SAN too — Windows rejects iPAddress-only certs
+# with error 13801 — while the iPAddress SAN stays for clients dialing the IP.
 params_ip="$(block cert-params "$(render "${FIX_ENV[@]}" VPN_SERVER_ADDR=203.0.113.7)")"
 params_dns="$(block cert-params "$(render "${FIX_ENV[@]}")")"
-has "case3 IP literal -> IP: SAN" "SERVER_SAN=IP:203.0.113.7" "$params_ip"
+has "case3 IP literal -> dns: SAN" "SERVER_SAN=dns:203.0.113.7" "$params_ip"
+has "case3 IP literal -> iPAddress SAN as well" "SERVER_SAN_ALT=IP:203.0.113.7" "$params_ip"
 has "case3 IP literal -> DN" "SERVER_DN=CN=203.0.113.7" "$params_ip"
 has "case3 FQDN -> DNS: SAN" "SERVER_SAN=DNS:vpn.example.com" "$params_dns"
 has "case3 FQDN -> DN" "SERVER_DN=CN=vpn.example.com" "$params_dns"
+lacks "case3 FQDN needs no second SAN" "SERVER_SAN_ALT" "$params_dns"
 
 # Case 4: a password may contain colons — split on the FIRST colon only (Review Focus 2)
 swanctl="$(block swanctl.conf "$(render IPSEC_USERS=a:b:c IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com)")"
@@ -207,6 +211,22 @@ fatal_is "case5 empty username" "FATAL: IPSEC_USERS entry with empty username" \
     IPSEC_USERS=:secret IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
 fatal_is "case5 duplicate username" "FATAL: duplicate IPSEC_USERS entry 'alice'" \
     IPSEC_USERS=alice:x,alice:y IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
+
+# Case 5b: characters the strongSwan config grammar cannot carry. These render a
+# config that loads but cannot authenticate, or truncates a password silently —
+# strictly worse than refusing to start.
+fatal_is "case5b space after comma" "FATAL: unsupported character" \
+    'IPSEC_USERS=alice:x, bob:y' IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
+fatal_is "case5b dot in username" "FATAL: unsupported character" \
+    IPSEC_USERS=al.ice:x IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
+fatal_is "case5b hash in username" "FATAL: unsupported character" \
+    'IPSEC_USERS=al#ice:x' IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
+fatal_is "case5b newline in password" "FATAL: unsupported character" \
+    "$(printf 'IPSEC_USERS=alice:a\nb')" IPSEC_PSK=psk9 VPN_SERVER_ADDR=vpn.example.com
+fatal_is "case5b hash in PSK" "FATAL: unsupported character" \
+    'IPSEC_USERS=alice:x' 'IPSEC_PSK=p#k' VPN_SERVER_ADDR=vpn.example.com
+fatal_is "case5b brace in PSK" "FATAL: unsupported character" \
+    'IPSEC_USERS=alice:x' 'IPSEC_PSK=p}k' VPN_SERVER_ADDR=vpn.example.com
 
 # Case 6: the rest of the env contract — required vars, pool CIDR, log level
 fatal_is "case6 missing IPSEC_USERS" "FATAL: IPSEC_USERS is required" \
@@ -244,6 +264,15 @@ x509/server-cert.pem
 x509ca/ca-cert.pem" \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'cd /etc/swanctl && ls private/ca-key.pem private/server-key.pem x509/server-cert.pem x509ca/ca-cert.pem 2>&1')"
+    # Native Windows/iOS/macOS IKEv2 clients accept only RSA or ECDSA P-256/P-384
+    # certificates — an Ed25519 server cert passes every other check here and is
+    # still rejected by the first real client.
+    has "case8 CA key is RSA" "rsaEncryption" \
+        "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
+            -c 'pki --print --in /etc/swanctl/x509ca/ca-cert.pem' 2>&1)"
+    has "case8 server key is RSA" "rsaEncryption" \
+        "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
+            -c 'pki --print --in /etc/swanctl/x509/server-cert.pem' 2>&1)"
 
     # Case 9: configs render to their real paths and sing-box accepts ours.
     # Listed inside the same container that renders them — only /etc/swanctl is
@@ -280,6 +309,36 @@ x509ca/ca-cert.pem" \
             -e BOOT_STAGE=certs-only -e VPN_POOL=172.17.0.0/16 "${FIX_DE[@]}" "$IMG"
     has "case12 overlap message" "overlaps the container's own subnet" "$LAST_OUT"
 
+    # Case 13: a sing-box crash must not silently lose the policy route. The tun
+    # device dies with the process and the kernel takes
+    # `default dev tun0 table 200` with it, so every decrypted packet is dropped
+    # while the healthcheck (charon) stays green.
+    cid="$(docker run -d --cap-add NET_ADMIN --cap-add NET_RAW --device /dev/net/tun \
+        -v "$vol":/etc/swanctl "${FIX_DE[@]}" "$IMG")"
+    trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; docker volume rm -f "$vol" >/dev/null 2>&1 || true' EXIT
+    for _ in $(seq 30); do docker exec "$cid" ip link show tun0 >/dev/null 2>&1 && break; sleep 1; done
+    has "case13 policy route installed at boot" "dev tun0" \
+        "$(docker exec "$cid" ip route show table 200 2>&1)"
+    docker exec "$cid" pkill -x sing-box 2>/dev/null || true
+    route_after=""
+    for _ in $(seq 30); do
+        route_after="$(docker exec "$cid" ip route show table 200 2>/dev/null)"
+        [ -n "$route_after" ] && break
+        sleep 1
+    done
+    has "case13 policy route reinstalled after sing-box crash" "dev tun0" "$route_after"
+
+    # Case 14: report.sh is what users paste into issue trackers — it must not
+    # echo a second user's password (the first user is not enough of a guard).
+    report_out="$(docker run --rm --entrypoint /bin/sh \
+        -e IPSEC_USERS=alice:leaked1,bob:leaked2 -e IPSEC_PSK=leaked3 \
+        "$IMG" -c 'report.sh' 2>&1)"
+    lacks "case14 report hides the first password" "leaked1" "$report_out"
+    lacks "case14 report hides later passwords" "leaked2" "$report_out"
+    lacks "case14 report hides the PSK" "leaked3" "$report_out"
+    has "case14 report still shows the pool" "VPN_POOL=" "$report_out"
+
+    docker rm -f "$cid" >/dev/null 2>&1 || true
     docker volume rm -f "$vol" >/dev/null 2>&1 || true
 fi
 
