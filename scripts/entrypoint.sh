@@ -263,15 +263,14 @@ guard_pool_subnet() {
 }
 
 generate_certs() {
-    local ca_cert="$SWANCTL_DIR/x509ca/ca-cert.pem" san dn pub
+    local ca_cert="$SWANCTL_DIR/x509ca/ca-cert.pem" pub
+    local -a params=()
     if [ -s "$ca_cert" ]; then
         log "reusing existing CA at $ca_cert"
         return
     fi
     mkdir -p "$SWANCTL_DIR"/x509ca "$SWANCTL_DIR"/certs "$SWANCTL_DIR"/private
-    san="${SERVER_SAN:-}"
-    dn="${SERVER_DN:-}"
-    [ -n "$san" ] || { mapfile -t cert_params_out < <(cert_params); san="${cert_params_out[0]#SERVER_SAN=}"; dn="${cert_params_out[1]#SERVER_DN=}"; }
+    mapfile -t params < <(cert_params)
     pub="$(mktemp)"
     pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
     pki --self --ca --lifetime 3650 --in "$SWANCTL_DIR/private/ca-key.pem" \
@@ -279,11 +278,11 @@ generate_certs() {
     pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
     pki --pub --in "$SWANCTL_DIR/private/server-key.pem" --outform pem >"$pub"
     pki --issue --lifetime 1095 --cacert "$ca_cert" --cakey "$SWANCTL_DIR/private/ca-key.pem" \
-        --in "$pub" --dn "$dn" --san "$san" \
+        --in "$pub" --dn "${params[1]#SERVER_DN=}" --san "${params[0]#SERVER_SAN=}" \
         --flag serverAuth --flag iKEIntermediate --outform pem >"$SWANCTL_DIR/certs/server-cert.pem"
     rm -f "$pub"
     chmod 600 "$SWANCTL_DIR/private/ca-key.pem" "$SWANCTL_DIR/private/server-key.pem"
-    log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/certs/server-cert.pem (SAN $san)"
+    log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/certs/server-cert.pem (${params[0]})"
 }
 
 render_configs() {
