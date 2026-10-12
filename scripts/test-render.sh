@@ -112,7 +112,9 @@ exit_is() { # name want cmd...  (stdout+stderr in $LAST_OUT)
     eq "$name" "$want" "$got"
 }
 
-matches() { # name regex got — a value that must be a real thing, not an empty string
+matches() { # name ERE got — a value that must be a real thing, not an empty string
+    # POSIX ERE only: bash's =~ has no (?i) flag, so case-insensitivity has to
+    # come from the caller ([Rr][Ss][Aa]) or from matching a fixed-case field.
     local name="$1" regex="$2" got="$3"
     if [[ "$got" =~ $regex ]]; then
         echo "$name: PASS"
@@ -267,13 +269,12 @@ x509ca/ca-cert.pem" \
     # Native Windows/iOS/macOS IKEv2 clients accept only RSA or ECDSA P-256/P-384
     # certificates — an Ed25519 server cert passes every other check here and is
     # still rejected by the first real client.
-    # matched case-insensitively: pki --print words the algorithm differently
-    # across versions ("rsaEncryption", "RSA", "sha256WithRSAEncryption"), but an
-    # Ed25519 certificate never says "rsa" anywhere
-    matches "case8 CA key is RSA" '(?i)rsa' \
+    # pki --print renders the key as "pubkey:    RSA 3072 bits"; an Ed25519 cert
+    # says "EdDSA 256 bits" here, so this discriminates algorithm AND size
+    matches "case8 CA key is RSA 3072" 'pubkey: +RSA +3072 +bits' \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'pki --print --in /etc/swanctl/x509ca/ca-cert.pem' 2>&1)"
-    matches "case8 server key is RSA" '(?i)rsa' \
+    matches "case8 server key is RSA 3072" 'pubkey: +RSA +3072 +bits' \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'pki --print --in /etc/swanctl/x509/server-cert.pem' 2>&1)"
 
