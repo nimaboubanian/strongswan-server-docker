@@ -29,7 +29,7 @@ ip xfrm policy 2>/dev/null | head -20 | sed 's/^/  /'
 
 echo
 echo "== Certificates =="
-for c in /etc/swanctl/certs/server-cert.pem /etc/swanctl/x509ca/ca-cert.pem; do
+for c in /etc/swanctl/x509/server-cert.pem /etc/swanctl/x509ca/ca-cert.pem; do
     if [ -f "$c" ]; then
         printf '  %s\n' "$c"
         openssl x509 -in "$c" -noout -subject -enddate 2>/dev/null | sed 's/^/    /' \

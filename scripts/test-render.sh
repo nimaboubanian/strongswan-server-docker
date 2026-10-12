@@ -238,12 +238,12 @@ if [ "$MODE" = docker ]; then
         image_run -v "$vol":/etc/swanctl -e BOOT_STAGE=certs-only "$IMG"
     has "case8 certs generated" "cert generation complete" "$LAST_OUT"
     eq "case8 all four cert files" \
-        "certs/server-cert.pem
-private/ca-key.pem
+        "private/ca-key.pem
 private/server-key.pem
+x509/server-cert.pem
 x509ca/ca-cert.pem" \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
-            -c 'cd /etc/swanctl && ls x509ca/ca-cert.pem private/ca-key.pem certs/server-cert.pem private/server-key.pem 2>&1')"
+            -c 'cd /etc/swanctl && ls private/ca-key.pem private/server-key.pem x509/server-cert.pem x509ca/ca-cert.pem 2>&1')"
 
     # Case 9: rendered configs land at their real paths and sing-box accepts ours
     exit_is "case9 configs render" 0 \
@@ -276,7 +276,7 @@ x509ca/ca-cert.pem" \
     exit_is "case12 pool overlap fatal" 2 \
         docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
             -e BOOT_STAGE=certs-only -e VPN_POOL=172.17.0.0/16 "${FIX_DE[@]}" "$IMG"
-    has "case12 overlap message" "FATAL: VPN_POOL overlaps" "$LAST_OUT"
+    has "case12 overlap message" "overlaps the container's own subnet" "$LAST_OUT"
 
     docker volume rm -f "$vol" >/dev/null 2>&1 || true
 fi

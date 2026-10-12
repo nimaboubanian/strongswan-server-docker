@@ -269,7 +269,7 @@ generate_certs() {
         log "reusing existing CA at $ca_cert"
         return
     fi
-    mkdir -p "$SWANCTL_DIR"/x509ca "$SWANCTL_DIR"/certs "$SWANCTL_DIR"/private
+    mkdir -p "$SWANCTL_DIR"/x509ca "$SWANCTL_DIR"/x509 "$SWANCTL_DIR"/private
     mapfile -t params < <(cert_params)
     pub="$(mktemp)"
     pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
@@ -277,12 +277,13 @@ generate_certs() {
         --dn "C=CH, O=vpndogs, CN=vpndogs IPsec CA" --outform pem >"$ca_cert"
     pki --gen --type ed25519 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
     pki --pub --in "$SWANCTL_DIR/private/server-key.pem" --outform pem >"$pub"
+    # x509/, not certs/: that is where swanctl looks for end-entity certs.
     pki --issue --lifetime 1095 --cacert "$ca_cert" --cakey "$SWANCTL_DIR/private/ca-key.pem" \
         --in "$pub" --dn "${params[1]#SERVER_DN=}" --san "${params[0]#SERVER_SAN=}" \
-        --flag serverAuth --flag iKEIntermediate --outform pem >"$SWANCTL_DIR/certs/server-cert.pem"
+        --flag serverAuth --flag iKEIntermediate --outform pem >"$SWANCTL_DIR/x509/server-cert.pem"
     rm -f "$pub"
     chmod 600 "$SWANCTL_DIR/private/ca-key.pem" "$SWANCTL_DIR/private/server-key.pem"
-    log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/certs/server-cert.pem (${params[0]})"
+    log "cert generation complete: CA $ca_cert, server cert $SWANCTL_DIR/x509/server-cert.pem (${params[0]})"
 }
 
 render_configs() {
