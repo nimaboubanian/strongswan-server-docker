@@ -306,10 +306,10 @@ generate_certs() {
     # iOS / macOS IKEv2 clients accept only RSA or ECDSA P-256/P-384
     # certificates, so an Ed25519 server cert loads here and is rejected by the
     # first real client.
-    pki --gen --type rsa --bits 3072 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
+    pki --gen --type rsa --size 3072 --outform pem >"$SWANCTL_DIR/private/ca-key.pem"
     pki --self --ca --lifetime 3650 --in "$SWANCTL_DIR/private/ca-key.pem" \
         --dn "C=CH, O=vpndogs, CN=vpndogs IPsec CA" --outform pem >"$ca_cert"
-    pki --gen --type rsa --bits 3072 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
+    pki --gen --type rsa --size 3072 --outform pem >"$SWANCTL_DIR/private/server-key.pem"
     pki --pub --in "$SWANCTL_DIR/private/server-key.pem" --outform pem >"$pub"
     # x509/, not certs/: that is where swanctl looks for end-entity certs.
     pki --issue --lifetime 1095 --cacert "$ca_cert" --cakey "$SWANCTL_DIR/private/ca-key.pem" \
