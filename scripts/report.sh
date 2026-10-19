@@ -3,8 +3,8 @@
 set -u
 
 echo "== Processes =="
-for p in charon sing-box; do
-    pid=$(pgrep -x "$p" 2>/dev/null | head -1)
+for p in charon hev-socks5-tunnel; do
+    pid=$(pgrep -f "^$p" 2>/dev/null | head -1)
     if [ -n "$pid" ]; then echo "  $p UP   pid=$pid"; else echo "  $p NOT RUNNING"; fi
 done
 

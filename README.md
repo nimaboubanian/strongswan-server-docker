@@ -94,7 +94,7 @@ docker compose exec ipsec report.sh
 ```
 
 1. **Both connections loaded** — `rw-eap` and `rw-psk` under *IKE connections*.
-2. **Processes up** — charon and sing-box both `UP`, and `ps -ef` shows charon
+2. **Processes up** — charon and hev-socks5-tunnel both `UP`, and `ps -ef` shows charon
    as a child of the starter (if the starter supervises a charon that is gone,
    the process tree is not what the supervisor expects).
 3. **A client connects**, then:
@@ -102,7 +102,7 @@ docker compose exec ipsec report.sh
 5. **The outbound XFRM policy is narrowed to that address.** `ip xfrm policy`
    inside the container must show the outbound policy narrowed to the assigned
    virtual IP (`src 10.10.10.x dst 0.0.0.0/0`) — **not** `0.0.0.0/0`. If either
-   side negotiated a wildcard, charon also ESP-encrypts sing-box's own SOCKS
+   side negotiated a wildcard, charon also ESP-encrypts hev-socks5-tunnel's own SOCKS
    traffic to the router, and the policy route cannot prevent it (XFRM output
    runs before the routing decision the rule governs): the tunnel goes nowhere
    and the router connection dies with it.

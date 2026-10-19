@@ -1,20 +1,20 @@
 ARG BASE_IMAGE=docker.io/library/alpine:3.24
+FROM ${BASE_IMAGE} AS hev-build
+ARG HEV_VERSION=2.14.4
+RUN apk add --no-cache gcc make musl-dev git linux-headers
+RUN set -eux; \
+    git clone --depth 1 --branch "${HEV_VERSION}" --recursive --shallow-submodules \
+        https://github.com/heiher/hev-socks5-tunnel /src; \
+    sed -i 's/^LDFLAGS=/LDFLAGS=-static /' /src/Makefile; \
+    make -C /src -j"$(nproc)"; \
+    install -m 755 /src/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel; \
+    /usr/local/bin/hev-socks5-tunnel -v || true
+
 FROM ${BASE_IMAGE}
 
-ARG SINGBOX_VERSION=1.14.2
-ARG TARGETARCH=amd64
+RUN apk add --no-cache bash jq tini iproute2 strongswan
 
-RUN apk add --no-cache bash curl jq tini ca-certificates iproute2 strongswan
-
-RUN set -eux; \
-    curl -fsSL -o /tmp/sing_box.tar.gz \
-        "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl.tar.gz"; \
-    tar -xzf /tmp/sing_box.tar.gz -C /tmp \
-        "sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box"; \
-    mv "/tmp/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl/sing-box" /usr/local/bin/sing-box; \
-    chmod +x /usr/local/bin/sing-box; \
-    rm -rf /tmp/sing_box.tar.gz "/tmp/sing-box-${SINGBOX_VERSION}-linux-${TARGETARCH}-musl"; \
-    sing-box version
+COPY --from=hev-build /usr/local/bin/hev-socks5-tunnel /usr/local/bin/hev-socks5-tunnel
 
 COPY --chmod=755 scripts /usr/local/bin
 

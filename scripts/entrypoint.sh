@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # entrypoint.sh — strongSwan roadwarrior server for the vpndogs inbound node.
 #
-#   entrypoint.sh                 boot: certs -> configs -> sing-box + charon
+#   entrypoint.sh                 boot: certs -> configs -> hev-socks5-tunnel + charon
 #   entrypoint.sh render          print every rendered config (test path)
 #   entrypoint.sh selftest-cidr A B   exit 0 if CIDR A and CIDR B overlap
 set -euo pipefail
@@ -22,7 +22,7 @@ IKEV1_ESP_PROPOSALS="aes128gcm16, aes128-sha256, aes128-sha1"
 
 SWANCTL_DIR="/etc/swanctl"
 STRONGSWAN_D="/etc/strongswan.d"
-SINGBOX_CONF="/etc/sing-box/config.json"
+HEV_CONF="/etc/hev/config.yml"
 ROUTER_TABLE=200
 
 log() { echo "[entrypoint] $*" >&2; }
@@ -201,26 +201,24 @@ EOF
     echo "}"
 }
 
-render_singbox_conf() {
-    # auto_route stays off on purpose: the entrypoint owns routing via a policy
-    # rule so only decrypted pool-source traffic enters the tun.
-    jq -n --arg host "$CHAIN_SOCKS_HOST" --argjson port "$CHAIN_SOCKS_PORT" '{
-        log: {level: "warn"},
-        inbounds: [{
-            type: "tun",
-            tag: "tun-in",
-            interface_name: "tun0",
-            address: ["198.18.0.1/30"],
-            mtu: 1380,
-            auto_route: false,
-            strict_route: false
-        }],
-        outbounds: [
-            {type: "direct", tag: "direct-out"},
-            {type: "socks", tag: "chain-out", server: $host, server_port: $port}
-        ],
-        route: {final: "chain-out"}
-    }'
+render_hev_conf() {
+    # Plain text: hev-socks5-tunnel has no config-check subcommand, so
+    # test-render.sh asserts the keys instead. udp: udp = SOCKS5 UDP ASSOCIATE.
+    # Routing stays with the entrypoint's policy rule, not the bridge.
+    cat <<EOF
+tunnel:
+  name: tun0
+  mtu: 1380
+  ipv4: 198.18.0.1
+
+socks5:
+  address: $CHAIN_SOCKS_HOST
+  port: $CHAIN_SOCKS_PORT
+  udp: udp
+
+misc:
+  log-level: warn
+EOF
 }
 
 cert_params() {
@@ -244,8 +242,8 @@ cmd_render() {
     render_strongswan_conf
     echo "# === swanctl.conf ==="
     render_swanctl_conf
-    echo "# === sing-box.json ==="
-    render_singbox_conf
+    echo "# === hev.yml ==="
+    render_hev_conf
     echo "# === cert-params ==="
     cert_params
 }
@@ -321,25 +319,24 @@ generate_certs() {
 }
 
 render_configs() {
-    mkdir -p "$STRONGSWAN_D" "$(dirname "$SINGBOX_CONF")"
+    mkdir -p "$STRONGSWAN_D" "$(dirname "$HEV_CONF")"
     render_strongswan_conf >"$STRONGSWAN_D/vpndogs.conf"
     render_swanctl_conf >"$SWANCTL_DIR/swanctl.conf"
-    render_singbox_conf >"$SINGBOX_CONF"
-    sing-box check -c "$SINGBOX_CONF" && log "sing-box config ok"
+    render_hev_conf >"$HEV_CONF"
 }
 
-start_singbox() {
-    sing-box run -c "$SINGBOX_CONF" &
-    CHILD_PIDS[sing-box]=$!
+start_hev() {
+    hev-socks5-tunnel "$HEV_CONF" &
+    CHILD_PIDS[hev]=$!
     wait_for 15 ip link show "$TUN_IFACE" \
         || { log "FATAL: $TUN_IFACE never came up — check /dev/net/tun in compose"; exit 1; }
-    log "sing-box up, $TUN_IFACE ready"
+    log "hev-socks5-tunnel up, $TUN_IFACE ready"
 }
 
 # Policy routing, not auto_route: only decrypted pool-source traffic enters the
-# tun. charon's own IKE and sing-box's SOCKS traffic keep the normal route.
+# tun. charon's own IKE and hev-socks5-tunnel's SOCKS traffic keep the normal route.
 # Idempotent: the tun device's death takes its route with it, so this runs again
-# after every sing-box restart.
+# after every hev-socks5-tunnel restart.
 install_routes() {
     ip rule del from "$VPN_POOL" lookup "$ROUTER_TABLE" 2>/dev/null || true
     ip rule add from "$VPN_POOL" lookup "$ROUTER_TABLE"
@@ -361,7 +358,7 @@ start_charon() {
 restart_child() {
     case "$1" in
         # a fresh tun needs its route back, or decrypted traffic is dropped
-        sing-box) start_singbox && install_routes ;;
+        hev)      start_hev && install_routes ;;
         charon) start_charon ;;
     esac
 }
@@ -390,7 +387,7 @@ supervise() {
 
 shutdown() {
     log "shutting down"
-    [ -n "${CHILD_PIDS[sing-box]:-}" ] && kill "${CHILD_PIDS[sing-box]}" 2>/dev/null || true
+    [ -n "${CHILD_PIDS[hev]:-}" ] && kill "${CHILD_PIDS[hev]}" 2>/dev/null || true
     [ -n "${CHILD_PIDS[charon]:-}" ] && kill "${CHILD_PIDS[charon]}" 2>/dev/null || true
     exit 0
 }
@@ -403,7 +400,7 @@ main() {
     if [ "${BOOT_STAGE:-}" = certs-only ]; then exit 0; fi
     render_configs
     if [ "${BOOT_STAGE:-}" = configs-only ]; then exit 0; fi
-    start_singbox
+    start_hev
     install_routes
     start_charon
     if [ "${BOOT_STAGE:-}" = load-only ]; then exit 0; fi

@@ -170,23 +170,19 @@ eq "case1 user passwords rendered" 2 \
 has "case1 psk secret rendered" "secret = psk9" "$swanctl"
 has "case1 psk accepts any identity" "id-1 = %any" "$swanctl"
 
-# Case 2: env overrides flow into pool/dns/socks; sing-box tun shape is pinned
+# Case 2: env overrides flow into pool/dns/socks; hev tun shape is pinned
 out="$(render "${FIX_ENV[@]}" VPN_POOL=10.99.0.0/22 CLIENT_DNS=9.9.9.9 \
     CHAIN_SOCKS_HOST=router2 CHAIN_SOCKS_PORT=2080)"
 swanctl="$(block swanctl.conf "$out")"
-sbx="$(block sing-box.json "$out")"
+hvx="$(block hev.yml "$out")"
 has "case2 pool override" "addrs = 10.99.0.0/22" "$swanctl"
 has "case2 dns override" "dns = 9.9.9.9" "$swanctl"
-assert "case2 sing-box shape" '
-    .inbounds[0].type == "tun"
-    and .inbounds[0].interface_name == "tun0"
-    and .inbounds[0].mtu == 1380
-    and .inbounds[0].auto_route == false
-    and (.outbounds[] | select(.tag == "chain-out") | .type) == "socks"
-    and (.outbounds[] | select(.tag == "chain-out") | .server) == "router2"
-    and (.outbounds[] | select(.tag == "chain-out") | .server_port) == 2080
-    and .route.final == "chain-out"
-' "$sbx"
+has "case2 hev tun name" "name: tun0" "$hvx"
+has "case2 hev mtu" "mtu: 1380" "$hvx"
+has "case2 hev socks host" "address: router2" "$hvx"
+has "case2 hev socks port" "port: 2080" "$hvx"
+has "case2 hev udp associate" "udp: udp" "$hvx"
+lacks "case2 hev no udp-in-tcp" "udp: tcp" "$hvx"
 
 # Case 3: SERVER_SAN type flips between IP literal and FQDN (Review Focus 3).
 # A bare IP must land in a dNSName SAN too — Windows rejects iPAddress-only certs
@@ -278,17 +274,16 @@ x509ca/ca-cert.pem" \
         "$(docker run --rm -v "$vol":/etc/swanctl --entrypoint /bin/sh "$IMG" \
             -c 'pki --print --in /etc/swanctl/x509/server-cert.pem' 2>&1)"
 
-    # Case 9: configs render to their real paths and sing-box accepts ours.
+    # Case 9: configs render to their real paths .
     # Listed inside the same container that renders them — only /etc/swanctl is
     # a volume, so a second container would only ever see swanctl.conf.
     exit_is "case9 configs render" 0 \
         docker run --rm -v "$vol":/etc/swanctl -e BOOT_STAGE=configs-only "${FIX_DE[@]}" \
             --entrypoint /bin/sh "$IMG" -c \
-            '/usr/local/bin/entrypoint.sh && ls /etc/swanctl/swanctl.conf /etc/strongswan.d/vpndogs.conf /etc/sing-box/config.json'
-    has "case9 sing-box config valid" "sing-box config ok" "$LAST_OUT"
+            '/usr/local/bin/entrypoint.sh && ls /etc/swanctl/swanctl.conf /etc/strongswan.d/vpndogs.conf /etc/hev/config.yml'
     has "case9 swanctl.conf landed" "/etc/swanctl/swanctl.conf" "$LAST_OUT"
     has "case9 strongswan drop-in landed" "/etc/strongswan.d/vpndogs.conf" "$LAST_OUT"
-    has "case9 sing-box config landed" "/etc/sing-box/config.json" "$LAST_OUT"
+    has "case9 hev-socks5-tunnel config landed" "/etc/hev/config.yml" "$LAST_OUT"
 
     # Case 10: live boot — charon accepts both connections (strongest check)
     exit_is "case10 live boot loads both conns" 0 \
@@ -313,7 +308,7 @@ x509ca/ca-cert.pem" \
             -e BOOT_STAGE=certs-only -e VPN_POOL=172.17.0.0/16 "${FIX_DE[@]}" "$IMG"
     has "case12 overlap message" "overlaps the container's own subnet" "$LAST_OUT"
 
-    # Case 13: a sing-box crash must not silently lose the policy route. The tun
+    # Case 13: a hev-socks5-tunnel crash must not silently lose the policy route. The tun
     # device dies with the process and the kernel takes
     # `default dev tun0 table 200` with it, so every decrypted packet is dropped
     # while the healthcheck (charon) stays green.
@@ -323,14 +318,14 @@ x509ca/ca-cert.pem" \
     for _ in $(seq 30); do docker exec "$cid" ip link show tun0 >/dev/null 2>&1 && break; sleep 1; done
     has "case13 policy route installed at boot" "dev tun0" \
         "$(docker exec "$cid" ip route show table 200 2>&1)"
-    docker exec "$cid" pkill -x sing-box 2>/dev/null || true
+    docker exec "$cid" pkill -f ^hev-socks5-tunnel 2>/dev/null || true
     route_after=""
     for _ in $(seq 30); do
         route_after="$(docker exec "$cid" ip route show table 200 2>/dev/null)"
         [ -n "$route_after" ] && break
         sleep 1
     done
-    has "case13 policy route reinstalled after sing-box crash" "dev tun0" "$route_after"
+    has "case13 policy route reinstalled after hev-socks5-tunnel crash" "dev tun0" "$route_after"
 
     # Case 14: report.sh is what users paste into issue trackers — it must not
     # echo a second user's password (the first user is not enough of a guard).
